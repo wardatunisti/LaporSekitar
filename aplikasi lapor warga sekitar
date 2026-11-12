@@ -1,0 +1,490 @@
+!pip install -q gradio pandas
+
+import gradio as gr
+import pandas as pd
+import sqlite3
+from datetime import date
+
+# =========================================
+# 1. DATABASE
+# =========================================
+
+DB_NAME = "laporsekitar.db"
+
+def connect_db():
+    return sqlite3.connect(DB_NAME)
+
+def create_database():
+    conn = connect_db()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            reporter TEXT,
+            location TEXT NOT NULL,
+            category TEXT NOT NULL,
+            description TEXT NOT NULL,
+            report_date TEXT,
+            status TEXT DEFAULT 'Menunggu'
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+
+create_database()
+
+# =========================================
+# 2. MEMBACA DATA LAPORAN
+# =========================================
+
+def read_reports(keyword=""):
+    conn = connect_db()
+
+    query = """
+        SELECT
+            id AS 'ID',
+            reporter AS 'Pelapor',
+            location AS 'Lokasi',
+            category AS 'Kategori',
+            description AS 'Deskripsi',
+            report_date AS 'Tanggal',
+            status AS 'Status'
+        FROM reports
+    """
+
+    if keyword and keyword.strip():
+        pattern = f"%{keyword.strip()}%"
+        query += """
+            WHERE location LIKE ?
+            OR category LIKE ?
+            OR description LIKE ?
+        """
+
+        df = pd.read_sql_query(
+            query + " ORDER BY id DESC",
+            conn,
+            params=(pattern, pattern, pattern)
+        )
+    else:
+        df = pd.read_sql_query(
+            query + " ORDER BY id DESC",
+            conn
+        )
+
+    conn.close()
+    return df
+
+# =========================================
+# 3. DASHBOARD
+# =========================================
+
+def get_dashboard():
+    conn = connect_db()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT COUNT(*) FROM reports")
+    total = cursor.fetchone()[0]
+
+    cursor.execute("""
+        SELECT COUNT(*) FROM reports
+        WHERE status = 'Menunggu'
+    """)
+    waiting = cursor.fetchone()[0]
+
+    cursor.execute("""
+        SELECT COUNT(*) FROM reports
+        WHERE status IN ('Ditinjau', 'Ditindaklanjuti')
+    """)
+    process = cursor.fetchone()[0]
+
+    cursor.execute("""
+        SELECT COUNT(*) FROM reports
+        WHERE status = 'Selesai'
+    """)
+    completed = cursor.fetchone()[0]
+
+    conn.close()
+
+    return total, waiting, process, completed
+
+# =========================================
+# 4. MENAMBAHKAN LAPORAN
+# =========================================
+
+def add_report(reporter, location, category,
+               description, report_date):
+
+    if not location or not location.strip():
+        return (
+            "Lokasi wajib diisi.",
+            read_reports(),
+            *get_dashboard()
+        )
+
+    if not description or not description.strip():
+        return (
+            "Deskripsi laporan wajib diisi.",
+            read_reports(),
+            *get_dashboard()
+        )
+
+    if not category:
+        return (
+            "Silakan pilih kategori laporan.",
+            read_reports(),
+            *get_dashboard()
+        )
+
+    if report_date:
+        try:
+            date.fromisoformat(report_date)
+        except ValueError:
+            return (
+                "Format tanggal harus YYYY-MM-DD.",
+                read_reports(),
+                *get_dashboard()
+            )
+
+    conn = connect_db()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        INSERT INTO reports
+        (reporter, location, category,
+         description, report_date, status)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (
+        (reporter or "").strip(),
+        location.strip(),
+        category,
+        description.strip(),
+        report_date,
+        "Menunggu"
+    ))
+
+    conn.commit()
+    conn.close()
+
+    return (
+        "Laporan berhasil dikirim!",
+        read_reports(),
+        *get_dashboard()
+    )
+
+# =========================================
+# 5. MEMPERBARUI STATUS LAPORAN
+# =========================================
+
+def update_status(report_id, new_status):
+
+    try:
+        report_id = int(report_id)
+    except (ValueError, TypeError):
+        return (
+            "Masukkan ID laporan yang benar.",
+            read_reports(),
+            *get_dashboard()
+        )
+
+    conn = connect_db()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        "SELECT id FROM reports WHERE id = ?",
+        (report_id,)
+    )
+
+    found = cursor.fetchone()
+
+    if not found:
+        conn.close()
+        return (
+            "ID laporan tidak ditemukan.",
+            read_reports(),
+            *get_dashboard()
+        )
+
+    cursor.execute("""
+        UPDATE reports
+        SET status = ?
+        WHERE id = ?
+    """, (new_status, report_id))
+
+    conn.commit()
+    conn.close()
+
+    return (
+        "Status laporan berhasil diperbarui!",
+        read_reports(),
+        *get_dashboard()
+    )
+
+# =========================================
+# 6. PENCARIAN DAN REFRESH
+# =========================================
+
+def search_report(keyword):
+    return read_reports(keyword or "")
+
+def refresh_data():
+    return read_reports(), *get_dashboard()
+
+# =========================================
+# 7. DESAIN APLIKASI
+# =========================================
+
+CSS = """
+.gradio-container {
+    background: #F5F3E9 !important;
+    color: #34483B !important;
+}
+
+h1, h2, h3 {
+    color: #34483B !important;
+}
+
+.block, .form {
+    border-radius: 16px !important;
+}
+
+button.primary {
+    background: #78917A !important;
+    border-color: #78917A !important;
+    color: white !important;
+}
+
+button.primary:hover {
+    background: #607A63 !important;
+}
+
+footer {
+    display: none !important;
+}
+"""
+
+# =========================================
+# 8. TAMPILAN UTAMA
+# =========================================
+
+with gr.Blocks() as app:
+
+    gr.Markdown("""
+    # 🌿 LaporSekitar
+    ### Sampaikan laporan, wujudkan lingkungan lebih baik.
+
+    Platform sederhana untuk mencatat dan memantau
+    permasalahan yang terjadi di lingkungan sekitar.
+    """)
+
+    gr.Markdown("## 📊 Dashboard Laporan")
+
+    with gr.Row():
+        total = gr.Number(
+            label="Total Laporan",
+            value=0,
+            interactive=False
+        )
+
+        waiting = gr.Number(
+            label="Menunggu",
+            value=0,
+            interactive=False
+        )
+
+        process = gr.Number(
+            label="Sedang Diproses",
+            value=0,
+            interactive=False
+        )
+
+        completed = gr.Number(
+            label="Selesai",
+            value=0,
+            interactive=False
+        )
+
+    gr.Markdown("---")
+    gr.Markdown("## 📝 Buat Laporan Baru")
+
+    reporter = gr.Textbox(
+        label="Nama Pelapor (Opsional)",
+        placeholder="Masukkan nama atau inisial"
+    )
+
+    location = gr.Textbox(
+        label="Lokasi Kejadian",
+        placeholder="Contoh: Jalan Melati RT 02 RW 03"
+    )
+
+    category = gr.Dropdown(
+        label="Kategori Permasalahan",
+        choices=[
+            "Sampah dan Kebersihan",
+            "Jalan Rusak",
+            "Lampu Jalan",
+            "Saluran Air",
+            "Fasilitas Umum",
+            "Keamanan Lingkungan",
+            "Lainnya"
+        ],
+        value="Sampah dan Kebersihan"
+    )
+
+    description = gr.Textbox(
+        label="Deskripsi Permasalahan",
+        placeholder="Jelaskan masalah yang terjadi...",
+        lines=4
+    )
+
+    report_date = gr.Textbox(
+        label="Tanggal Laporan",
+        value=date.today().isoformat(),
+        placeholder="YYYY-MM-DD"
+    )
+
+    submit_btn = gr.Button(
+        "🌱 Kirim Laporan",
+        variant="primary"
+    )
+
+    submit_message = gr.Markdown()
+
+    gr.Markdown("---")
+    gr.Markdown("## 📋 Daftar Laporan")
+
+    with gr.Row():
+        keyword = gr.Textbox(
+            label="Cari Laporan",
+            placeholder="Cari lokasi atau kategori..."
+        )
+
+        search_btn = gr.Button("🔍 Cari")
+        refresh_btn = gr.Button("🔄 Tampilkan Semua")
+
+    report_table = gr.Dataframe(
+        value=read_reports(),
+        interactive=False,
+        wrap=True
+    )
+
+    gr.Markdown("---")
+    gr.Markdown("## 🔄 Pembaruan Status Laporan")
+
+    with gr.Row():
+        report_id = gr.Number(
+            label="ID Laporan",
+            precision=0,
+            value=None
+        )
+
+        new_status = gr.Dropdown(
+            label="Status Baru",
+            choices=[
+                "Menunggu",
+                "Ditinjau",
+                "Ditindaklanjuti",
+                "Selesai",
+                "Ditolak"
+            ],
+            value="Menunggu"
+        )
+
+    update_btn = gr.Button(
+        "Perbarui Status",
+        variant="primary"
+    )
+
+    update_message = gr.Markdown()
+
+    gr.Markdown("""
+    ---
+    **LaporSekitar** 🌿
+
+    Bersama menjaga lingkungan agar lebih nyaman,
+    bersih, dan tertata.
+    """)
+
+    # =====================================
+    # 9. HUBUNGAN TOMBOL DAN FUNGSI
+    # =====================================
+
+    submit_btn.click(
+        fn=add_report,
+        inputs=[
+            reporter,
+            location,
+            category,
+            description,
+            report_date
+        ],
+        outputs=[
+            submit_message,
+            report_table,
+            total,
+            waiting,
+            process,
+            completed
+        ]
+    )
+
+    update_btn.click(
+        fn=update_status,
+        inputs=[
+            report_id,
+            new_status
+        ],
+        outputs=[
+            update_message,
+            report_table,
+            total,
+            waiting,
+            process,
+            completed
+        ]
+    )
+
+    search_btn.click(
+        fn=search_report,
+        inputs=[keyword],
+        outputs=[report_table]
+    )
+
+    refresh_btn.click(
+        fn=refresh_data,
+        inputs=[],
+        outputs=[
+            report_table,
+            total,
+            waiting,
+            process,
+            completed
+        ]
+    )
+
+    app.load(
+        fn=refresh_data,
+        inputs=[],
+        outputs=[
+            report_table,
+            total,
+            waiting,
+            process,
+            completed
+        ]
+    )
+
+# =========================================
+# 10. MENJALANKAN APLIKASI
+# =========================================
+
+app.launch(
+    share=True,
+    theme=gr.themes.Soft(
+        primary_hue="green",
+        secondary_hue="stone",
+        neutral_hue="stone"
+    ),
+    css=CSS
+)
